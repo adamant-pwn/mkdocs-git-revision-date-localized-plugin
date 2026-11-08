@@ -152,6 +152,16 @@ class Util:
                     no_show_signature=True,
                     follow=follow_option,
                 ).strip()
+                if lines == "":
+                    # `git log --follow` can stop at a rename without reaching the commit that
+                    # created the file (seen with git 2.56.0). Then use the oldest commit it reached.
+                    lines = git.log(
+                        realpath,
+                        date="unix",
+                        format="%H %at",
+                        no_show_signature=True,
+                        follow=follow_option,
+                    ).strip()
                 # A file can be created multiple times, through a file renamed.
                 # Commits are ordered with most recent commit first
                 # Get the oldest commit only

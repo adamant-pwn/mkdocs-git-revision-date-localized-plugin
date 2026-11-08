@@ -1033,3 +1033,62 @@ def test_creation_commits_only_looked_up_when_enabled(tmp_path, mkdocs_file, exp
 
     assert plugin.last_revision_commits, "Last revision commits should always be looked up"
     assert bool(plugin.created_commits) is expect_creation_lookups
+
+
+def test_creation_date_when_follow_misses_the_creation_commit(tmp_path):
+    """
+    Pages created by a rename still get a creation date from git history.
+
+    Since git 2.56.0, `git log --follow` can stop at a rename when the parent of
+    the rename commit also has an older child on a side branch that is merged
+    later. The creation query (`--diff-filter=Ar`) then returns nothing, and the
+    build time used to be taken as the creation date. That is later than the last
+    revision date, which logs a warning and fails `mkdocs build --strict`.
+    """
+    testproject_path = setup_clean_mkdocs_folder("tests/fixtures/basic_project/mkdocs_creation_date.yml", tmp_path)
+    repo = init_test_repo(testproject_path)
+
+    def commit(message, timestamp, *args):
+        with repo.git.custom_environment(GIT_AUTHOR_DATE=timestamp, GIT_COMMITTER_DATE=timestamp):
+            repo.git.commit("-m", message, *args)
+
+    def write(path, lines):
+        (testproject_path / path).write_text("".join(f"{line}\n" for line in lines))
+
+    with working_directory(testproject_path):
+        write("docs/old.md", range(1, 21))
+        write("other.txt", ["x"])
+        repo.git.add(".")
+        commit("add", "1577836800 +0000")
+        main = repo.active_branch.name
+
+        repo.git.checkout("-b", "side")
+        write("other.txt", ["y"])
+        commit("side", "1577923200 +0000", "-a")
+
+        repo.git.checkout(main)
+        repo.git.mv("docs/old.md", "docs/new.md")
+        # 15 of 20 lines kept: detected as a rename by the commit itself
+        write("docs/new.md", [*range(1, 16), *range(101, 106)])
+        commit("rename", "1578009600 +0000", "-a")
+        # Too different from docs/old.md for a rename between the side branch and the merge
+        write("docs/new.md", range(201, 221))
+        commit("rewrite", "1578096000 +0000", "-a")
+        with repo.git.custom_environment(GIT_AUTHOR_DATE="1578182400 +0000", GIT_COMMITTER_DATE="1578182400 +0000"):
+            repo.git.merge("--no-ff", "side", "-m", "merge")
+
+        util = Util(config={"strict": True, "enable_git_follow": True}, mkdocs_dir=str(testproject_path))
+        page = str(testproject_path / "docs/new.md")
+        creation_hash, creation_timestamp = util.get_git_commit_timestamp(path=page, is_first_commit=True)
+        _, revision_timestamp = util.get_git_commit_timestamp(path=page, is_first_commit=False)
+
+        # git before 2.56 finds the commit that added docs/old.md; git 2.56 only
+        # reaches the rename. Either is a commit date, never the build time.
+        assert creation_timestamp in (1577836800, 1578009600)
+        assert creation_hash
+        assert creation_timestamp <= revision_timestamp == 1578096000
+
+        with capture_plugin_logs() as logs:
+            build(load_config("mkdocs.yml"))
+        assert "docs/new.md" not in logs.getvalue()
+        assert "First revision timestamp is older" not in logs.getvalue()
