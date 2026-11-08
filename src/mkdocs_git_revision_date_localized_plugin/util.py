@@ -106,6 +106,61 @@ class Util:
         """Resolve symlinks, and case on case-insensitive filesystems, so paths compare equal."""
         return os.path.normcase(os.path.realpath(path))
 
+    @staticmethod
+    def _find_creation_past_renames(git: Git, path: str, max_renames: int = 10) -> str:
+        """
+        Find the commit that created a file when `git log --follow` stops at a rename.
+
+        Since git 2.56.0, `git log --follow` can stop at a rename without reaching the
+        commit that created the file. This happens when the parent of the rename commit
+        also has an older child on a side branch that is merged later. The search then
+        continues from the parent of the rename, under the old name.
+
+        Args:
+            git (Git): git command wrapper for the repository that contains path.
+            path (str): Absolute path of the file.
+            max_renames (int): Maximum number of renames to continue past.
+
+        Returns:
+            str: lines "<hash> <timestamp>" with the creation commit last, or "" if git
+                finds no commit for the file.
+        """
+        toplevel = os.path.realpath(git.rev_parse(show_toplevel=True))
+        rev = "HEAD"
+        lines = ""
+        log_options = {"date": "unix", "format": "%H %at", "no_show_signature": True, "follow": True}
+        for _ in range(max_renames):
+            followed = git.log(rev, "--", path, **log_options).strip()
+            if not followed:
+                return lines
+            lines = followed
+            # Look for a rename in the oldest commit that --follow reached
+            oldest = followed.split("\n")[-1].split(" ")[0]
+            try:
+                changes = git.diff_tree("-r", "-M", "-z", "--name-status", f"{oldest}^", oldest).split("\0")
+            except GitCommandError:
+                # The oldest commit has no parent, so it created the file
+                return lines
+            relative_path = Path(os.path.relpath(path, toplevel)).as_posix()
+            old_path = None
+            i = 0
+            while i + 1 < len(changes):
+                status = changes[i]
+                if status[:1] in ("R", "C") and i + 2 < len(changes):
+                    if changes[i + 2] == relative_path:
+                        old_path = changes[i + 1]
+                    i += 3
+                else:
+                    i += 2
+            if old_path is None:
+                return lines
+            path = os.path.join(toplevel, old_path)
+            rev = f"{oldest}^"
+            created = git.log(rev, "--", path, diff_filter="Ar", **log_options).strip()
+            if created:
+                return created
+        return lines
+
     def get_git_commit_timestamp(self, path: str, is_first_commit: bool = False) -> tuple[str, int]:
         """
         Get a list of commit dates in unix timestamp, starts with the most recent commit.
@@ -152,16 +207,8 @@ class Util:
                     no_show_signature=True,
                     follow=follow_option,
                 ).strip()
-                if lines == "":
-                    # `git log --follow` can stop at a rename without reaching the commit that
-                    # created the file (seen with git 2.56.0). Then use the oldest commit it reached.
-                    lines = git.log(
-                        realpath,
-                        date="unix",
-                        format="%H %at",
-                        no_show_signature=True,
-                        follow=follow_option,
-                    ).strip()
+                if lines == "" and follow_option:
+                    lines = self._find_creation_past_renames(git, realpath)
                 # A file can be created multiple times, through a file renamed.
                 # Commits are ordered with most recent commit first
                 # Get the oldest commit only

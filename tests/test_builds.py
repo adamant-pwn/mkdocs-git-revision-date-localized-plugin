@@ -1044,6 +1044,7 @@ def test_creation_date_when_follow_misses_the_creation_commit(tmp_path):
     later. The creation query (`--diff-filter=Ar`) then returns nothing, and the
     build time used to be taken as the creation date. That is later than the last
     revision date, which logs a warning and fails `mkdocs build --strict`.
+    The plugin should continue from the rename to the commit that added the old path.
     """
     testproject_path = setup_clean_mkdocs_folder("tests/fixtures/basic_project/mkdocs_creation_date.yml", tmp_path)
     repo = init_test_repo(testproject_path)
@@ -1082,10 +1083,9 @@ def test_creation_date_when_follow_misses_the_creation_commit(tmp_path):
         creation_hash, creation_timestamp = util.get_git_commit_timestamp(path=page, is_first_commit=True)
         _, revision_timestamp = util.get_git_commit_timestamp(path=page, is_first_commit=False)
 
-        # git before 2.56 finds the commit that added docs/old.md; git 2.56 only
-        # reaches the rename. Either is a commit date, never the build time.
-        assert creation_timestamp in (1577836800, 1578009600)
-        assert creation_hash
+        # The commit that added docs/old.md, also with git 2.56, whose --follow stops at the rename
+        assert creation_timestamp == 1577836800
+        assert creation_hash == repo.git.rev_list("--max-parents=0", "HEAD").strip()
         assert creation_timestamp <= revision_timestamp == 1578096000
 
         with capture_plugin_logs() as logs:
